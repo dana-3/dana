@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>반응 속도 탐구: 온도와 농도</title>
+<style>
+:root{--bg:#f4f6fb;--card:#fff;--ink:#1c2333;--muted:#5d6678;--line:#d9deea;--accent:#2f6df6;--accent-ink:#fff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#10141f;--card:#192030;--ink:#e8ecf5;--muted:#9aa4ba;--line:#2a3348;--accent:#5b8cff;--accent-ink:#0b1020}}
+:root[data-theme="dark"]{--bg:#10141f;--card:#192030;--ink:#e8ecf5;--muted:#9aa4ba;--line:#2a3348;--accent:#5b8cff;--accent-ink:#0b1020}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif;display:flex;flex-direction:column}
+header{display:flex;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--card);flex-wrap:wrap}
+#start,#stop{font:inherit;font-weight:700;font-size:1.05rem;padding:10px 24px;border-radius:10px;cursor:pointer;white-space:nowrap}
+#start{border:0;background:var(--accent);color:var(--accent-ink)}
+#stop{border:1px solid var(--line);background:var(--card);color:var(--ink)}
+#start:disabled,#stop:disabled{opacity:.5;cursor:default}
+#hint{color:var(--muted);font-size:.92rem;line-height:1.4}
+main{flex:1;min-height:0;display:grid;grid-template-columns:1fr minmax(300px,380px)}
+#stage{position:relative;min-height:300px;overflow:hidden}
+#stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.labels{position:absolute;inset:0;display:grid;grid-template-columns:1fr 1fr;pointer-events:none}
+.col{display:flex;flex-direction:column;justify-content:space-between;align-items:center;padding:14px 6px;text-align:center}
+.lab{font-weight:700;font-size:1.15rem}
+.sub{font-size:.85rem;color:var(--muted);margin-top:2px}
+.time{font-size:.95rem;text-align:center;color:var(--muted)}
+.time b{font-size:1.5rem;color:var(--ink);font-variant-numeric:tabular-nums}
+aside{display:flex;flex-direction:column;gap:12px;padding:12px;overflow:auto}
+.card{flex:1;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+.card h2{margin:0;font-size:1.05rem;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.chk{font-size:.88rem;font-weight:500;display:flex;gap:6px;align-items:center;cursor:pointer}
+.row{display:grid;grid-template-columns:62px 1fr 72px;gap:8px;align-items:center;font-size:.95rem}
+.row output{text-align:right;font-variant-numeric:tabular-nums;font-weight:700}
+input[type=range]{width:100%;accent-color:var(--accent)}
+input:disabled{opacity:.45}
+.note{margin:0;color:var(--muted);font-size:.84rem;line-height:1.55}
+@media(max-width:720px){html,body{height:auto;min-height:100%}main{grid-template-columns:1fr;grid-template-rows:60vh auto}}
+</style>
+</head>
+<body>
+<header><button id="start">반응 시작</button><button id="stop" disabled>실험 중단</button><span id="hint"></span></header>
+<main>
+  <section id="stage">
+    <div class="labels">
+      <div class="col"><div><div class="lab">1번 비커</div><div class="sub"></div></div><div class="time" id="time0"></div></div>
+      <div class="col"><div><div class="lab">2번 비커</div><div class="sub"></div></div><div class="time" id="time1"></div></div>
+    </div>
+  </section>
+  <aside id="aside"></aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ===== 조절 가능한 상수 =====
+const CONFIG = {
+  TEMP_MIN: 0, TEMP_MAX: 500, TEMP_STEP: 5, TEMP_DEFAULT: 300,   // K
+  CONC_MIN: 0, CONC_MAX: 10, CONC_STEP: 0.1, CONC_DEFAULT: 1,    // M (KIO3)
+  NAHSO3_CONC: 2,                  // M, 비커 이름 밑에 표시되는 NaHSO3 농도
+  T_REF: 300, C_REF: 1, REF_TIME: 20,   // 기준 조건(300 K, 1 M)에서 반응 완결 시간(s)
+  ACTIVATION_ENERGY: 50000, GAS_CONSTANT: 8.314,   // J/mol, J/(mol·K)
+  ORDER: 1,                        // 농도에 대한 반응 차수
+  MIN_TIME: 0.01,                  // s, 표시되는 최소 반응 시간
+  ANIM_MIN_SECONDS: 3, ANIM_MAX_SECONDS: 15,  // 화면에서 가장 오래 걸리는 비커가 끝나기까지 실제로 흐르는 시간 범위(애니메이션 속도만 조절, 계산된 반응 시간은 그대로)
+  VIEW_HEIGHT: 7.4,                // 3D 화면 세로 길이
+  MAX_PARTICLES: 36, MIN_PARTICLES: 2,   // 10 M일 때 입자 수 / 최소 입자 수 (농도에 비례)
+  PARTICLE_SIZE: 0.46,             // 입자(둥근 모형) 지름
+  SPEED_BASE: 0.9,                 // 300 K에서의 입자 속도
+  HOT_RATIO: 3,                    // 클수록 활성 입자(주황색) 비율이 작아짐
+  COLLISION_DIST: 0.4,             // 이 거리 안으로 가까워지면 충돌
+  LABELS: ['KIO₃', 'NaHSO₃'], PRODUCT_LABEL: 'I₂',   // 입자 가운데에 표시되는 이름
+  COLORS: { start: 0xf3e9a8, done: 0x1a237e, particle: 0x2196f3, hot: 0xff3d00, product: 0xab47bc, flash: 0xffffaa, heat: 0xff2200 }
+};
+
+const $ = id => document.getElementById(id);
+document.querySelectorAll('.sub').forEach(e => e.innerHTML = CONFIG.NAHSO3_CONC + 'M NaHSO<sub>3</sub> + 녹말 수용액');
+const LEGEND = '<br>● 파란색: 보통 분자(KIO₃, NaHSO₃) ● 주황색: 활성화 에너지 이상 ● 보라색: 생성물(I₂)';
+
+// ===== 입력 카드 =====
+const defs = {
+  T: { title: '온도', chk: '온도 변화 실험', min: CONFIG.TEMP_MIN, max: CONFIG.TEMP_MAX, step: CONFIG.TEMP_STEP, def: CONFIG.TEMP_DEFAULT,
+       note: '온도가 높아지면 큰 운동 에너지를 가진 분자 수가 늘어, 활성화 에너지 이상의 에너지를 가진 분자(주황색 입자)도 많아집니다. 유효 충돌을 하는 분자 수가 증가하므로 반응 속도가 빨라집니다.' + LEGEND },
+  C: { title: '농도 (KIO₃)', chk: '농도 변화 실험', min: CONFIG.CONC_MIN, max: CONFIG.CONC_MAX, step: CONFIG.CONC_STEP, def: CONFIG.CONC_DEFAULT,
+       note: '농도가 높아지면 단위 부피당 입자 수가 늘어 충돌 횟수가 증가하고, 반응 속도가 빨라집니다. 농도가 높을수록 비커 속 입자가 많아져 서로 더 자주 만나 반응합니다.' }
+};
+$('aside').innerHTML = ['T', 'C'].map(k => {
+  const d = defs[k];
+  return `<section class="card"><h2>${d.title}<label class="chk"><input type="checkbox" id="chk${k}">${d.chk}</label></h2>` +
+    [0, 1].map(i => `<div class="row"><span>${i + 1}번 비커</span><input type="range" id="s${k}${i}" min="${d.min}" max="${d.max}" step="${d.step}" value="${d.def}"><output id="o${k}${i}"></output></div>`).join('') +
+    `<p class="note">${d.note}</p></section>`;
+}).join('');
+
+const val = { T: [CONFIG.TEMP_DEFAULT, CONFIG.TEMP_DEFAULT], C: [CONFIG.CONC_DEFAULT, CONFIG.CONC_DEFAULT] };
+const run = { on: false, stopped: false, t: 0, scale: 1, total: [0, 0], done: [false, false], none: [false, false] };
+
+function showVals() {
+  [0, 1].forEach(i => {
+    $('oT' + i).textContent = val.T[i] + ' K';
+    $('oC' + i).textContent = val.C[i].toFixed(1) + ' M';
+  });
+}
+function mode() { return $('chkT').checked ? 'T' : $('chkC').checked ? 'C' : null; }
+function syncDisabled() {
+  const m = mode();
+  ['T', 'C'].forEach(k => {
+    $('chk' + k).disabled = run.on;
+    [0, 1].forEach(i => { $(`s${k}${i}`).disabled = run.on || m !== k; });
+  });
+  $('start').disabled = run.on;
+  $('stop').disabled = !run.on;
+}
+function setHint() {
+  const m = mode();
+  $('hint').textContent = m === 'T' ? '두 비커의 온도를 다르게 설정한 뒤 [반응 시작]을 누르세요. (농도는 고정)'
+    : m === 'C' ? '두 비커의 농도를 다르게 설정한 뒤 [반응 시작]을 누르세요. (온도는 고정)'
+    : '오른쪽에서 실험할 조건(온도 또는 농도)을 먼저 체크하세요.';
+}
+function fmtT(t) {
+  if (t >= 1e7) return t.toExponential(2);
+  if (t >= 1000) return t.toLocaleString('ko-KR', { maximumFractionDigits: 1 });
+  return t.toFixed(2);
+}
+function updateTimes() {
+  [0, 1].forEach(i => {
+    $('time' + i).innerHTML = run.none[i] ? '<b>반응 없음</b><br>(∞ s)'
+      : `걸린 시간<br><b>${fmtT(run.done[i] ? run.total[i] : run.t)}</b> s`;
+  });
+}
+function resetRun() {
+  run.stopped = false; run.t = 0; run.done = [false, false]; run.none = [false, false];
+  beakers.forEach(b => b.reset());
+  updateTimes();
+}
+function applyMode() {
+  const m = mode();
+  ['T', 'C'].forEach(k => { if (m !== k) [0, 1].forEach(i => { val[k][i] = defs[k].def; $(`s${k}${i}`).value = defs[k].def; }); });
+  showVals(); syncDisabled(); resetRun(); setHint();
+}
+['T', 'C'].forEach(k => {
+  $('chk' + k).onchange = e => { if (e.target.checked) $('chk' + (k === 'T' ? 'C' : 'T')).checked = false; applyMode(); };
+  [0, 1].forEach(i => $(`s${k}${i}`).oninput = e => { val[k][i] = +e.target.value; showVals(); resetRun(); });
+});
+
+// ===== 반응 시간 모델: t = t_ref · (C_ref/C)^n · exp[Ea/R · (1/T − 1/T_ref)] =====
+function calcTime(T, C) {
+  if (T <= 0 || C <= 0) return Infinity;
+  const t = CONFIG.REF_TIME * Math.pow(CONFIG.C_REF / C, CONFIG.ORDER) *
+    Math.exp(CONFIG.ACTIVATION_ENERGY / CONFIG.GAS_CONSTANT * (1 / T - 1 / CONFIG.T_REF));
+  return Math.max(t, CONFIG.MIN_TIME);
+}
+
+// ===== Three.js 장면 =====
+const wrap = $('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+wrap.insertBefore(renderer.domElement, wrap.firstChild);
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 50);
+cam.position.set(0, 2.0, 10); cam.lookAt(0, 0, 0);
+scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+const dl = new THREE.DirectionalLight(0xffffff, 0.6); dl.position.set(2, 4, 6); scene.add(dl);
+
+// 비커 모양: 둥근 바닥 + 살짝 볼록한 몸통 + 바깥으로 벌어진 입구
+const LIQ_BASE = -1.7, LIQ_TOP = 0.35, RB = 0.95, CR = 0.5;
+function wallR(y) {
+  if (y < -1.2) { const dy = -1.2 - y; return RB - CR + Math.sqrt(Math.max(0, CR * CR - dy * dy)); }
+  let r = RB + 0.08 * Math.sin(Math.PI * (y + 1.2) / 2.9);
+  if (y > 1.45) r += 0.14 * Math.pow((y - 1.45) / 0.25, 2);
+  return r;
+}
+const rIn = y => wallR(y) * 0.94 - CONFIG.PARTICLE_SIZE / 2;   // 입자가 움직일 수 있는 반지름
+const P = [[0, -1.7]];
+for (let k = 0; k <= 10; k++) { const a = -Math.PI / 2 + k * Math.PI / 20; P.push([RB - CR + CR * Math.cos(a), -1.2 + CR * Math.sin(a)]); }
+for (let k = 1; k <= 40; k++) { const y = -1.2 + k * 2.9 / 40; P.push([wallR(y), y]); }
+const glassPts = P.map(p => new THREE.Vector2(p[0], p[1]));
+const liqPts = P.filter(p => p[1] < LIQ_TOP - 1e-6).map(p => new THREE.Vector2(p[0] * 0.94, p[1]));
+liqPts.push(new THREE.Vector2(wallR(LIQ_TOP) * 0.94, LIQ_TOP), new THREE.Vector2(0, LIQ_TOP));
+
+const css = c => '#' + c.toString(16).padStart(6, '0');
+const cStart = new THREE.Color(CONFIG.COLORS.start), cDone = new THREE.Color(CONFIG.COLORS.done);
+
+const glowTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 6, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+})();
+
+// 둥근 입자 모형 (가운데에 입자 이름)
+function mk(label, color) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.beginPath(); g.arc(64, 64, 60, 0, Math.PI * 2); g.fillStyle = css(color); g.fill();
+  g.lineWidth = 4; g.strokeStyle = 'rgba(255,255,255,.85)'; g.stroke();
+  g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = `bold ${label.length <= 3 ? 46 : label.length <= 4 ? 40 : 30}px sans-serif`;
+  g.fillText(label, 64, 67);
+  return new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthTest: false });
+}
+const mats = {
+  n: CONFIG.LABELS.map(l => mk(l, CONFIG.COLORS.particle)),
+  h: CONFIG.LABELS.map(l => mk(l, CONFIG.COLORS.hot)),
+  p: mk(CONFIG.PRODUCT_LABEL, CONFIG.COLORS.product)
+};
+
+function makeBeaker() {
+  const group = new THREE.Group();
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(5, 5.8),
+    new THREE.MeshBasicMaterial({ map: glowTex, color: CONFIG.COLORS.heat, transparent: true, opacity: 0, depthWrite: false }));
+  glow.position.set(0, 0.2, -1.5); glow.renderOrder = -1;
+  const glass = new THREE.Mesh(new THREE.LatheGeometry(glassPts, 48),
+    new THREE.MeshPhongMaterial({ color: 0xbfe3ff, transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthWrite: false }));
+  glass.renderOrder = 2;
+  const rim = new THREE.Mesh(new THREE.TorusGeometry(wallR(1.7), 0.035, 8, 48), new THREE.MeshBasicMaterial({ color: 0xd8eeff }));
+  rim.rotation.x = Math.PI / 2; rim.position.y = 1.7;
+  const liq = new THREE.Mesh(new THREE.LatheGeometry(liqPts, 48),
+    new THREE.MeshLambertMaterial({ color: CONFIG.COLORS.start, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }));
+
+  // 입자 (개수는 농도에 비례, 짝수 번째는 KIO₃, 홀수 번째는 NaHSO₃)
+  const M = CONFIG.MAX_PARTICLES, sprites = [], vel = [], u = [], prod = new Array(M).fill(false);
+  for (let i = 0; i < M; i++) {
+    const s = new THREE.Sprite(mats.n[i % 2]); s.scale.setScalar(CONFIG.PARTICLE_SIZE); s.renderOrder = 3;
+    const r = 0.6 * Math.sqrt(Math.random()), a = Math.random() * Math.PI * 2;
+    s.position.set(r * Math.cos(a), LIQ_BASE + 0.3 + Math.random() * (LIQ_TOP - LIQ_BASE - 0.6), r * Math.sin(a));
+    vel.push(new THREE.Vector3(Math.random() - .5, Math.random() - .5, Math.random() - .5).normalize());
+    u.push(-Math.log(1 - Math.random()));
+    group.add(s); sprites.push(s);
+  }
+
+  // 충돌(반응) 순간의 번쩍임
+  const flashes = [];
+  for (let i = 0; i < 8; i++) {
+    const f = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 12),
+      new THREE.MeshBasicMaterial({ color: CONFIG.COLORS.flash, transparent: true, opacity: 0, depthTest: false }));
+    f.renderOrder = 4; f.life = 0; flashes.push(f);
+  }
+  function flash(p, q) {
+    const f = flashes.find(m => m.life <= 0); if (!f) return;
+    f.position.copy(p).add(q).multiplyScalar(0.5); f.life = 0.35;
+  }
+  group.add(glow, liq, glass, rim, ...flashes);
+
+  const b = { group, blue: 0, conv: 0 };
+  b.reset = () => { prod.fill(false); b.conv = 0; b.blue = 0; };
+  b.update = (dt, T, C, prog, done, frozen) => {
+    const mdt = frozen ? 0 : dt;   // 중단 상태에서는 입자·번쩍임이 그대로 멈춤
+    glow.material.opacity = Math.min(1, T / CONFIG.TEMP_MAX) * 0.9;
+    if (done) b.blue = Math.min(1, b.blue + dt * 3);
+    liq.material.color.lerpColors(cStart, cDone, b.blue);
+    liq.material.opacity = 0.5 + 0.35 * b.blue;
+
+    const n = C <= 0 ? 0 : Math.min(M, Math.max(CONFIG.MIN_PARTICLES, Math.round(C / CONFIG.CONC_MAX * M)));
+    // 입자 이동: 속도 ∝ √T
+    const sp = CONFIG.SPEED_BASE * Math.sqrt(Math.max(T, 0) / CONFIG.T_REF), y0 = LIQ_BASE + CONFIG.PARTICLE_SIZE / 2, y1 = LIQ_TOP - CONFIG.PARTICLE_SIZE / 2;
+    for (let i = 0; i < M; i++) {
+      const s = sprites[i]; s.visible = i < n; if (i >= n) continue;
+      const p = s.position, v = vel[i];
+      p.x += v.x * sp * mdt; p.y += v.y * sp * mdt; p.z += v.z * sp * mdt;
+      const ri = rIn(p.y), d2 = p.x * p.x + p.z * p.z;
+      if (d2 > ri * ri) { const k = ri / Math.sqrt(d2); p.x *= k; p.z *= k; v.x *= -1; v.z *= -1; }
+      if (p.y < y0 || p.y > y1) { v.y *= -1; p.y = Math.min(y1, Math.max(y0, p.y)); }
+    }
+    // 충돌 → 반응: KIO₃와 NaHSO₃가 충돌하면 진행률만큼의 입자가 I₂로 바뀜
+    const target = done ? n : Math.floor(prog * n), cd2 = CONFIG.COLLISION_DIST * CONFIG.COLLISION_DIST;
+    if (!frozen && b.conv < target) {
+      outer: for (let i = 0; i < n; i++) {
+        if (prod[i]) continue;
+        for (let j = i + 1; j < n; j++) {
+          if (prod[j] || (i % 2) === (j % 2)) continue;
+          if (sprites[i].position.distanceToSquared(sprites[j].position) < cd2) {
+            prod[i] = prod[j] = true; b.conv += 2;
+            flash(sprites[i].position, sprites[j].position);
+            if (b.conv >= target) break outer;
+          }
+        }
+      }
+    }
+    if (done) for (let i = 0; i < n; i++) if (!prod[i]) { prod[i] = true; b.conv++; }
+    // 모양: 생성물(보라) / 활성 입자(주황) / 보통 입자(파랑)
+    for (let i = 0; i < n; i++) {
+      const hot = T > 0 && u[i] > CONFIG.HOT_RATIO * CONFIG.T_REF / T;
+      sprites[i].material = prod[i] ? mats.p : hot ? mats.h[i % 2] : mats.n[i % 2];
+    }
+    flashes.forEach(f => {
+      if (f.life > 0) f.life -= mdt;
+      f.material.opacity = f.life > 0 ? f.life / 0.35 * 0.9 : 0;
+      f.scale.setScalar(1 + (0.35 - Math.max(f.life, 0)) * 6);
+    });
+  };
+  return b;
+}
+const beakers = [makeBeaker(), makeBeaker()];
+const root = new THREE.Group(); root.position.y = -0.4; scene.add(root);
+beakers.forEach(b => root.add(b.group));
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight; if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  const H = CONFIG.VIEW_HEIGHT, W = H * w / h;
+  cam.left = -W / 2; cam.right = W / 2; cam.top = H / 2; cam.bottom = -H / 2; cam.updateProjectionMatrix();
+  const s = Math.min(1, (W / 2) / 2.5);
+  beakers.forEach((b, i) => { b.group.position.x = (i ? 1 : -1) * W / 4; b.group.scale.setScalar(s); });
+}
+new ResizeObserver(resize).observe(wrap);
+
+// ===== 실행 / 중단 =====
+$('start').onclick = () => {
+  run.total = [0, 1].map(i => calcTime(val.T[i], val.C[i]));
+  run.none = run.total.map(t => !isFinite(t));
+  run.done = [false, false]; run.t = 0; run.stopped = false;
+  beakers.forEach(b => b.reset());
+  // 오래 걸리는 반응도 끝까지 볼 수 있도록 화면 속 시계 속도만 조절 (반응 시간 계산에는 영향 없음)
+  const mx = Math.max(0, ...run.total.filter(isFinite));
+  run.scale = mx > 0 ? mx / Math.min(CONFIG.ANIM_MAX_SECONDS, Math.max(CONFIG.ANIM_MIN_SECONDS, mx)) : 1;
+  run.on = true; syncDisabled(); updateTimes();
+  $('hint').textContent = '반응이 진행 중입니다… 용액이 청람색으로 변하면 반응 완결!';
+};
+$('stop').onclick = () => {
+  run.on = false; run.stopped = true; syncDisabled();   // 시간·입자·색을 그 순간 그대로 유지
+  $('hint').textContent = '실험을 중단했어요. 지금 상태 그대로 멈춰 있습니다. [반응 시작]을 누르면 처음부터 다시 시작해요.';
+};
+function finish() {
+  run.on = false; syncDisabled();
+  const [a, b] = run.total; let msg;
+  if (run.none[0] && run.none[1]) msg = '두 비커 모두 반응이 일어나지 않았어요. (0 K 또는 0 M)';
+  else if (run.none[0] || run.none[1]) msg = (run.none[0] ? 2 : 1) + '번 비커만 반응이 완결되었어요.';
+  else if (Math.abs(a - b) < 1e-6) msg = '두 비커의 걸린 시간이 같아요.';
+  else msg = `${a < b ? 1 : 2}번 비커가 약 ${(Math.max(a, b) / Math.min(a, b)).toFixed(1)}배 빨리 반응했어요.`;
+  $('hint').textContent = msg;
+}
+const clock = new THREE.Clock();
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (run.on) {
+    run.t += dt * run.scale;
+    [0, 1].forEach(i => { if (!run.none[i] && !run.done[i] && run.t >= run.total[i]) run.done[i] = true; });
+    updateTimes();
+    if ([0, 1].every(i => run.done[i] || run.none[i])) finish();
+  }
+  beakers.forEach((b, i) => {
+    const prog = run.done[i] ? 1 : ((run.on || run.stopped) && !run.none[i]) ? Math.min(1, run.t / run.total[i]) : 0;
+    b.update(dt, val.T[i], val.C[i], prog, run.done[i], run.stopped);
+  });
+  renderer.render(scene, cam);
+  requestAnimationFrame(tick);
+}
+showVals(); syncDisabled(); updateTimes(); setHint(); resize(); tick();
+</script>
+</body>
+</html>
